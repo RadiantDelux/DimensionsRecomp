@@ -14,7 +14,6 @@ public sealed class EasyInstallForm : Form
     static readonly Color Muted = Color.FromArgb(102, 112, 133);
     static readonly Color Line = Color.FromArgb(222, 227, 236);
     static readonly Color Accent = Color.FromArgb(103, 80, 214);
-    static readonly Color AccentSoft = Color.FromArgb(241, 238, 255);
     static readonly Color Success = Color.FromArgb(24, 128, 85);
     static readonly Color Danger = Color.FromArgb(180, 35, 24);
     static readonly Color Community = Color.FromArgb(176, 96, 15);
@@ -297,17 +296,19 @@ public sealed class EasyInstallForm : Form
 
     void ShowGameMenu(Button anchor)
     {
-        using var menu = new ContextMenuStrip { Font = Font };
+        var menu = new ContextMenuStrip { Font = Font };
         menu.Items.Add("Disc image (.iso)", null, (_, _) => PickGameIso());
         menu.Items.Add("Extracted game folder", null, (_, _) => PickFolder(game, "Select the extracted LEGO Dimensions game folder", false));
+        menu.Closed += (_, _) => menu.Dispose();
         menu.Show(anchor, new Point(0, anchor.Height));
     }
 
     void ShowUpdateMenu(Button anchor)
     {
-        using var menu = new ContextMenuStrip { Font = Font };
+        var menu = new ContextMenuStrip { Font = Font };
         menu.Items.Add("Original TU23 package", null, (_, _) => PickUpdatePackage());
         menu.Items.Add("Extracted TU23 folder", null, (_, _) => PickFolder(update, "Select the extracted Title Update 23 folder", false));
+        menu.Closed += (_, _) => menu.Dispose();
         menu.Show(anchor, new Point(0, anchor.Height));
     }
 
