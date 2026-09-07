@@ -15,7 +15,7 @@ public sealed class EasyInstallForm : Form
     readonly TextBox dlc = new();
     readonly TextBox install = new();
     readonly Label status = new();
-    readonly ProgressBar progress = new();
+    readonly ProgressBar progress = new() { Maximum = 1000 };
     readonly Button detect = new() { Text = "Auto-detect" };
     readonly Button installButton = new() { Text = "Install" };
     readonly Button advanced = new() { Text = "Advanced..." };
@@ -23,7 +23,7 @@ public sealed class EasyInstallForm : Form
     readonly CheckBox updates = new() { Text = "Automatic update checks", Checked = true, AutoSize = true };
     CancellationTokenSource? cts;
     bool installing;
-    string? readme;
+    string? completedDir;
 
     public EasyInstallForm(PayloadSource payload)
     {
@@ -35,37 +35,29 @@ public sealed class EasyInstallForm : Form
         Font = new Font("Segoe UI", 9.5f);
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
-        var heading = new Label
+        Controls.Add(new Label
         {
             Text = "Dimensions Recompiled - Recommended setup",
             Font = new Font("Segoe UI Semibold", 16f),
-            Bounds = new Rectangle(24, 20, 700, 34),
-            AutoSize = false,
-        };
-        var intro = new Label
+            Bounds = new Rectangle(24, 20, 700, 34), AutoSize = false,
+        });
+        Controls.Add(new Label
         {
-            Text = "Point the installer at your own Xbox 360 game files and Title Update 23. " +
-                   "It can use an extracted disc folder or extract your ISO automatically. " +
-                   "DLC is optional. No copyrighted game data is downloaded.",
+            Text = "Select your own Xbox 360 game files and Title Update 23. The installer can extract your ISO automatically, " +
+                   "validate the correct build, install DLC and configure the recommended components. No copyrighted game data is downloaded.",
             Bounds = new Rectangle(24, 62, 710, 58), AutoSize = false,
-        };
-        Controls.AddRange(new Control[] { heading, intro });
+        });
 
         int y = 130;
-        AddPathRow("Game disc / ISO", game, y,
-            () => PickGame(game));
+        AddPathRow("Game disc / ISO", game, y, () => PickGame(game));
         y += 78;
-        AddPathRow("Title Update 23", update, y,
-            () => PickUpdate(update));
+        AddPathRow("Title Update 23", update, y, () => PickUpdate(update));
         y += 78;
-        AddPathRow("DLC folder (optional)", dlc, y,
-            () => PickFolder(dlc, "Select the folder containing your DLC packages", false));
+        AddPathRow("DLC folder (optional)", dlc, y, () => PickFolder(dlc, "Select the folder containing your DLC packages", false));
         y += 78;
-        AddPathRow("Install location", install, y,
-            () => PickFolder(install, "Choose where Dimensions Recompiled will be installed", true));
+        AddPathRow("Install location", install, y, () => PickFolder(install, "Choose where Dimensions Recompiled will be installed", true));
 
         install.Text = Path.Combine(Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\", "Games", WizardForm.AppName);
-
         shortcut.Location = new Point(24, 446);
         updates.Location = new Point(220, 446);
         detect.Bounds = new Rectangle(24, 480, 118, 34);
@@ -77,7 +69,15 @@ public sealed class EasyInstallForm : Form
 
         detect.Click += async (_, _) => await DetectAsync();
         advanced.Click += (_, _) => OpenAdvanced();
-        installButton.Click += async (_, _) => await InstallAsync();
+        installButton.Click += async (_, _) =>
+        {
+            if (completedDir is not null)
+            {
+                try { Process.Start(new ProcessStartInfo(completedDir) { UseShellExecute = true }); } catch { }
+                return;
+            }
+            await InstallAsync();
+        };
         FormClosing += (_, e) =>
         {
             if (!installing) return;
@@ -118,7 +118,7 @@ public sealed class EasyInstallForm : Form
             int found = (result.GamePath is null ? 0 : 1) + (result.UpdatePath is null ? 0 : 1) + (result.DlcPath is null ? 0 : 1);
             status.Text = found == 0
                 ? "Nothing was auto-detected. Use Browse to select your files."
-                : $"Auto-detection found {found} source{(found == 1 ? "" : "s")}. Please verify the paths, then click Install.";
+                : $"Auto-detection found {found} source{(found == 1 ? "" : "s")}. Verify the paths, then click Install.";
             status.ForeColor = found == 0 ? Color.DimGray : Color.ForestGreen;
             if (!silent && found == 0)
                 MessageBox.Show(this, "No matching files were found automatically. Select your game ISO/folder and TU23 manually.",
@@ -198,18 +198,17 @@ public sealed class EasyInstallForm : Form
                 progress.Value = Math.Clamp((int)(p.Fraction * 1000), 0, 1000);
                 if (p.Status != last) { last = p.Status; status.Text = p.Status; }
             });
-            progress.Maximum = 1000;
             var job = new InstallJob(options, payload, reporter, cts.Token);
             await job.RunAsync(foundDlc);
-            readme = job.ReadmePath;
+            ForkPostInstall.Apply(options.InstallDir);
+
+            completedDir = options.InstallDir;
             progress.Value = 1000;
             status.ForeColor = Color.ForestGreen;
             status.Text = "Installation complete. Dimensions Recompiled is ready to launch.";
             installButton.Text = "Open folder";
-            installButton.Click -= async (_, _) => await InstallAsync();
             MessageBox.Show(this, "Installation completed successfully.", WizardForm.AppName,
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
-            try { Process.Start(new ProcessStartInfo(options.InstallDir) { UseShellExecute = true }); } catch { }
         }
         catch (OperationCanceledException)
         {
@@ -227,7 +226,7 @@ public sealed class EasyInstallForm : Form
         }
     }
 
-    string? CheckInstallPath(string path, string gamePath)
+    static string? CheckInstallPath(string path, string gamePath)
     {
         if (string.IsNullOrWhiteSpace(path)) return "Choose an install location.";
         try { path = Path.GetFullPath(path); }
@@ -261,7 +260,11 @@ public sealed class EasyInstallForm : Form
 
     void PickGame(TextBox box)
     {
-        using var f = new OpenFileDialog { Title = "Select your Xbox 360 LEGO Dimensions ISO", Filter = "Xbox 360 ISO (*.iso)|*.iso|All files|*.*" };
+        using var f = new OpenFileDialog
+        {
+            Title = "Select your Xbox 360 LEGO Dimensions ISO",
+            Filter = "Xbox 360 ISO (*.iso)|*.iso|All files|*.*"
+        };
         if (f.ShowDialog(this) == DialogResult.OK) { box.Text = f.FileName; return; }
         PickFolder(box, "Or select the already-extracted LEGO Dimensions disc folder", false);
     }
@@ -296,7 +299,8 @@ public sealed class EasyInstallForm : Form
     {
         installing = busy;
         game.Enabled = update.Enabled = dlc.Enabled = install.Enabled = !busy;
-        detect.Enabled = advanced.Enabled = installButton.Enabled = !busy;
+        detect.Enabled = advanced.Enabled = !busy;
+        installButton.Enabled = !busy || completedDir is not null;
         shortcut.Enabled = updates.Enabled = !busy;
         if (message is not null) { status.Text = message; status.ForeColor = Color.DimGray; }
     }
