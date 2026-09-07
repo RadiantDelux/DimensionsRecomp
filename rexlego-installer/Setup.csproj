@@ -27,6 +27,7 @@
     <!-- tools\Probe is its own project; keep its sources and obj\ out of this one. -->
     <Compile Remove="tools\**" />
     <EmbeddedResource Include="Resources\README.txt" LogicalName="README.txt" />
+    <EmbeddedResource Include="..\docs\logo.png" LogicalName="DimensionsLogo.png" />
   </ItemGroup>
 
 </Project>
