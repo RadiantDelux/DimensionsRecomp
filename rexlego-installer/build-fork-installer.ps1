@@ -114,10 +114,10 @@ dotnet publish "$PSScriptRoot\Setup.csproj" -c Release -r win-x64 --self-contain
     -o $publishDir -nologo -v q
 if ($LASTEXITCODE -ne 0) { throw "Installer host publish failed" }
 
-$host = Join-Path $publishDir "DimensionsRecompiled-Setup.exe"
-if (-not (Test-Path -LiteralPath $host)) { throw "Published installer host is missing" }
+$hostExe = Join-Path $publishDir "DimensionsRecompiled-Setup.exe"
+if (-not (Test-Path -LiteralPath $hostExe)) { throw "Published installer host is missing" }
 $final = Join-Path $OutputDir "DimensionsRecompiled-Setup.exe"
-Copy-Item -LiteralPath $host -Destination $final -Force
+Copy-Item -LiteralPath $hostExe -Destination $final -Force
 
 Write-Step "Downloading latest public upstream installer payload"
 $asset = Get-UpstreamInstallerAsset -Repo $UpstreamRepo
