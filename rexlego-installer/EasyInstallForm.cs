@@ -3,24 +3,39 @@ using System.Diagnostics;
 namespace RecompSetup;
 
 /// <summary>
-/// Recommended one-screen installer. It auto-detects the user's files, accepts
-/// an Xbox 360 ISO directly, chooses sane components and runs the same InstallJob
-/// as the original advanced wizard.
+/// The recommended setup surface. It keeps the legal/source-file decisions in
+/// front of the user, but handles extraction, validation, components and config
+/// without turning installation into a long wizard.
 /// </summary>
 public sealed class EasyInstallForm : Form
 {
+    static readonly Color Page = Color.FromArgb(245, 247, 251);
+    static readonly Color Ink = Color.FromArgb(25, 32, 48);
+    static readonly Color Muted = Color.FromArgb(102, 112, 133);
+    static readonly Color Line = Color.FromArgb(222, 227, 236);
+    static readonly Color Accent = Color.FromArgb(103, 80, 214);
+    static readonly Color AccentSoft = Color.FromArgb(241, 238, 255);
+    static readonly Color Success = Color.FromArgb(24, 128, 85);
+    static readonly Color Danger = Color.FromArgb(180, 35, 24);
+    static readonly Color Community = Color.FromArgb(176, 96, 15);
+
     readonly PayloadSource payload;
-    readonly TextBox game = new();
-    readonly TextBox update = new();
-    readonly TextBox dlc = new();
-    readonly TextBox install = new();
+    readonly TextBox game = PathBox("Xbox 360 ISO or extracted game folder");
+    readonly TextBox update = PathBox("TU23 package or extracted update folder");
+    readonly TextBox dlc = PathBox("Optional folder containing DLC packages");
+    readonly TextBox install = PathBox("Installation folder");
+    readonly ComboBox language = new();
+    readonly Label languageAvailability = new();
+    readonly Label languageDetail = new();
     readonly Label status = new();
-    readonly ProgressBar progress = new() { Maximum = 1000 };
-    readonly Button detect = new() { Text = "Auto-detect" };
-    readonly Button installButton = new() { Text = "Install" };
-    readonly Button advanced = new() { Text = "Advanced..." };
-    readonly CheckBox shortcut = new() { Text = "Create desktop shortcut", Checked = true, AutoSize = true };
-    readonly CheckBox updates = new() { Text = "Automatic update checks", Checked = true, AutoSize = true };
+    readonly ProgressBar progress = new() { Maximum = 1000, Visible = false };
+    readonly Button detect = SecondaryButton("Find files automatically");
+    readonly Button installButton = PrimaryButton("Install");
+    readonly Button openFolder = SecondaryButton("Open folder");
+    readonly LinkLabel advanced = new();
+    readonly CheckBox shortcut = OptionBox("Create a desktop shortcut", true);
+    readonly CheckBox updates = OptionBox("Check for updates automatically", true);
+    readonly List<Button> browseButtons = new();
     CancellationTokenSource? cts;
     bool installing;
     string? completedDir;
@@ -28,86 +43,278 @@ public sealed class EasyInstallForm : Form
     public EasyInstallForm(PayloadSource payload)
     {
         this.payload = payload;
-        Text = WizardForm.AppName + " - Easy Setup";
-        ClientSize = new Size(760, 560);
-        MinimumSize = new Size(680, 520);
+        Text = WizardForm.AppName + " Setup";
+        ClientSize = new Size(920, 700);
+        MinimumSize = MaximumSize = new Size(936, 739);
+        FormBorderStyle = FormBorderStyle.FixedSingle;
+        MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
+        AutoScaleMode = AutoScaleMode.Dpi;
+        BackColor = Page;
         Font = new Font("Segoe UI", 9.5f);
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
-        Controls.Add(new Label
-        {
-            Text = "Dimensions Recompiled - Recommended setup",
-            Font = new Font("Segoe UI Semibold", 16f),
-            Bounds = new Rectangle(24, 20, 700, 34), AutoSize = false,
-        });
-        Controls.Add(new Label
-        {
-            Text = "Select your own Xbox 360 game files and Title Update 23. The installer can extract your ISO automatically, " +
-                   "validate the correct build, install DLC and configure the recommended components. No copyrighted game data is downloaded.",
-            Bounds = new Rectangle(24, 62, 710, 58), AutoSize = false,
-        });
-
-        int y = 130;
-        AddPathRow("Game disc / ISO", game, y, () => PickGame(game));
-        y += 78;
-        AddPathRow("Title Update 23", update, y, () => PickUpdate(update));
-        y += 78;
-        AddPathRow("DLC folder (optional)", dlc, y, () => PickFolder(dlc, "Select the folder containing your DLC packages", false));
-        y += 78;
-        AddPathRow("Install location", install, y, () => PickFolder(install, "Choose where Dimensions Recompiled will be installed", true));
+        BuildHeader();
+        BuildSourceCard();
+        BuildOptionsCard();
+        BuildFooter();
 
         install.Text = Path.Combine(Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\", "Games", WizardForm.AppName);
-        shortcut.Location = new Point(24, 446);
-        updates.Location = new Point(220, 446);
-        detect.Bounds = new Rectangle(24, 480, 118, 34);
-        advanced.Bounds = new Rectangle(150, 480, 118, 34);
-        installButton.Bounds = new Rectangle(620, 480, 116, 34);
-        progress.Bounds = new Rectangle(284, 486, 320, 20);
-        status.Bounds = new Rectangle(24, 518, 712, 34);
-        status.ForeColor = Color.DimGray;
+        PopulateLanguages();
 
         detect.Click += async (_, _) => await DetectAsync();
-        advanced.Click += (_, _) => OpenAdvanced();
+        advanced.LinkClicked += (_, _) => OpenAdvanced();
         installButton.Click += async (_, _) =>
         {
+            if (installing)
+            {
+                cts?.Cancel();
+                return;
+            }
             if (completedDir is not null)
             {
-                try { Process.Start(new ProcessStartInfo(completedDir) { UseShellExecute = true }); } catch { }
+                LaunchGame();
                 return;
             }
             await InstallAsync();
         };
+        openFolder.Click += (_, _) => OpenInstallFolder();
         FormClosing += (_, e) =>
         {
             if (!installing) return;
             e.Cancel = true;
-            if (MessageBox.Show(this, "Cancel the installation?", "Cancel", MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Question) == DialogResult.Yes)
+            if (MessageBox.Show(this, "Cancel the installation in progress?", "Dimensions Recompiled",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
                 cts?.Cancel();
         };
 
-        Controls.AddRange(new Control[] { shortcut, updates, detect, advanced, installButton, progress, status });
-
+        AcceptButton = installButton;
         var sys = SystemCheck.Run();
-        status.Text = sys.Supported ? sys.Summary : string.Join("  ", sys.Warnings);
-        status.ForeColor = sys.Supported ? Color.ForestGreen : Color.Firebrick;
+        SetStatus(sys.Supported ? sys.Summary : string.Join("  ", sys.Warnings),
+                  sys.Supported ? Success : Danger);
         Shown += async (_, _) => { if (sys.Supported) await DetectAsync(silent: true); };
     }
 
-    void AddPathRow(string label, TextBox box, int y, Action browse)
+    void BuildHeader()
     {
-        var l = new Label { Text = label, Bounds = new Rectangle(24, y, 710, 22) };
-        box.Bounds = new Rectangle(24, y + 24, 590, 27);
-        var b = new Button { Text = "Browse...", Bounds = new Rectangle(624, y + 22, 112, 30) };
-        b.Click += (_, _) => browse();
-        Controls.AddRange(new Control[] { l, box, b });
+        var header = new Panel
+        {
+            Bounds = new Rectangle(0, 0, ClientSize.Width, 132),
+            BackColor = Color.FromArgb(18, 24, 38),
+        };
+        Controls.Add(header);
+
+        Image? logo = LoadLogo();
+        if (logo is not null)
+        {
+            header.Controls.Add(new PictureBox
+            {
+                Image = logo,
+                SizeMode = PictureBoxSizeMode.Zoom,
+                Bounds = new Rectangle(28, 18, 248, 96),
+                BackColor = Color.Transparent,
+            });
+        }
+
+        header.Controls.Add(new Label
+        {
+            Text = "Set up Dimensions Recompiled",
+            Font = new Font("Segoe UI Semibold", 20f),
+            ForeColor = Color.White,
+            Bounds = new Rectangle(310, 30, 560, 38),
+        });
+        header.Controls.Add(new Label
+        {
+            Text = "Bring your game files once. Setup handles the rest.",
+            Font = new Font("Segoe UI", 10.5f),
+            ForeColor = Color.FromArgb(196, 202, 215),
+            Bounds = new Rectangle(312, 72, 520, 26),
+        });
+
+        string version = typeof(EasyInstallForm).Assembly.GetName().Version?.ToString(3) ?? "0.1.0";
+        header.Controls.Add(new Label
+        {
+            Text = "PRE-RELEASE  ·  " + version,
+            Font = new Font("Segoe UI Semibold", 8.5f),
+            ForeColor = Color.FromArgb(190, 179, 255),
+            TextAlign = ContentAlignment.MiddleRight,
+            Bounds = new Rectangle(710, 100, 170, 20),
+        });
+    }
+
+    void BuildSourceCard()
+    {
+        var card = Card(new Rectangle(24, 154, 564, 444));
+        Controls.Add(card);
+        card.Controls.Add(SectionTitle("Game files", 22));
+        card.Controls.Add(new Label
+        {
+            Text = "Use your own disc dump and Title Update 23. Files are validated before anything is installed.",
+            ForeColor = Muted,
+            Bounds = new Rectangle(22, 52, 516, 38),
+        });
+
+        AddPathRow(card, "Disc image or extracted folder", game, 92, ShowGameMenu);
+        AddPathRow(card, "Title Update 23", update, 167, ShowUpdateMenu);
+        AddPathRow(card, "DLC", dlc, 242, b => PickFolder(dlc, "Select the folder containing your DLC packages", false));
+        AddPathRow(card, "Install location", install, 317, b => PickFolder(install, "Choose where Dimensions Recompiled will be installed", true));
+
+        detect.Bounds = new Rectangle(22, 394, 184, 32);
+        card.Controls.Add(detect);
+        card.Controls.Add(new Label
+        {
+            Text = "No game data is downloaded.",
+            ForeColor = Muted,
+            TextAlign = ContentAlignment.MiddleRight,
+            Bounds = new Rectangle(290, 397, 250, 26),
+        });
+    }
+
+    void BuildOptionsCard()
+    {
+        var card = Card(new Rectangle(606, 154, 290, 444));
+        Controls.Add(card);
+        card.Controls.Add(SectionTitle("Preferences", 22));
+        card.Controls.Add(new Label
+        {
+            Text = "Game language",
+            Font = new Font("Segoe UI Semibold", 9.5f),
+            ForeColor = Ink,
+            Bounds = new Rectangle(22, 66, 240, 22),
+        });
+
+        language.DropDownStyle = ComboBoxStyle.DropDownList;
+        language.FlatStyle = FlatStyle.Flat;
+        language.Font = new Font("Segoe UI", 10f);
+        language.BackColor = Color.White;
+        language.ForeColor = Ink;
+        language.Bounds = new Rectangle(22, 91, 246, 32);
+        language.SelectedIndexChanged += (_, _) => RefreshLanguageDescription();
+        card.Controls.Add(language);
+
+        languageAvailability.Font = new Font("Segoe UI Semibold", 8.75f);
+        languageAvailability.Bounds = new Rectangle(22, 132, 246, 22);
+        card.Controls.Add(languageAvailability);
+        languageDetail.ForeColor = Muted;
+        languageDetail.Bounds = new Rectangle(22, 156, 246, 72);
+        card.Controls.Add(languageDetail);
+
+        card.Controls.Add(new Label
+        {
+            BorderStyle = BorderStyle.Fixed3D,
+            Bounds = new Rectangle(22, 238, 246, 2),
+        });
+        card.Controls.Add(new Label
+        {
+            Text = "Install options",
+            Font = new Font("Segoe UI Semibold", 9.5f),
+            ForeColor = Ink,
+            Bounds = new Rectangle(22, 258, 240, 22),
+        });
+
+        updates.Location = new Point(22, 289);
+        shortcut.Location = new Point(22, 321);
+        card.Controls.AddRange(new Control[] { updates, shortcut });
+
+        card.Controls.Add(new Label
+        {
+            Text = "Toy Pad support and bundled mods are installed automatically when present in this build.",
+            ForeColor = Muted,
+            Bounds = new Rectangle(22, 357, 246, 52),
+        });
+
+        advanced.Text = "Advanced setup";
+        advanced.LinkColor = Accent;
+        advanced.ActiveLinkColor = Color.FromArgb(79, 57, 184);
+        advanced.VisitedLinkColor = Accent;
+        advanced.Font = new Font("Segoe UI Semibold", 9f);
+        advanced.AutoSize = true;
+        advanced.Location = new Point(22, 410);
+        card.Controls.Add(advanced);
+    }
+
+    void BuildFooter()
+    {
+        status.ForeColor = Muted;
+        status.Font = new Font("Segoe UI", 9.25f);
+        status.Bounds = new Rectangle(24, 617, 590, 24);
+        Controls.Add(status);
+
+        progress.Bounds = new Rectangle(24, 647, 590, 8);
+        progress.Style = ProgressBarStyle.Continuous;
+        Controls.Add(progress);
+
+        openFolder.Bounds = new Rectangle(624, 624, 122, 42);
+        openFolder.Visible = false;
+        Controls.Add(openFolder);
+
+        installButton.Bounds = new Rectangle(758, 624, 138, 42);
+        Controls.Add(installButton);
+
+        Controls.Add(new Label
+        {
+            Text = "You can change most settings later with F4 in game.",
+            ForeColor = Muted,
+            Font = new Font("Segoe UI", 8.5f),
+            Bounds = new Rectangle(24, 668, 480, 20),
+        });
+    }
+
+    void PopulateLanguages()
+    {
+        var available = GameLanguages.AvailableFor(payload);
+        foreach (var item in available) language.Items.Add(item);
+        var preferred = GameLanguages.DetectWindowsLanguage(payload);
+        int selected = available.ToList().FindIndex(l => l.Key == preferred.Key);
+        language.SelectedIndex = selected >= 0 ? selected : 0;
+        RefreshLanguageDescription();
+    }
+
+    void RefreshLanguageDescription()
+    {
+        if (language.SelectedItem is not GameLanguageOption selected) return;
+        languageAvailability.Text = selected.Availability;
+        languageAvailability.ForeColor = selected.RequiresRussianMod ? Community : Accent;
+        languageDetail.Text = selected.Detail;
+    }
+
+    void AddPathRow(Panel card, string label, TextBox box, int y, Action<Button> browse)
+    {
+        card.Controls.Add(new Label
+        {
+            Text = label,
+            Font = new Font("Segoe UI Semibold", 9.25f),
+            ForeColor = Ink,
+            Bounds = new Rectangle(22, y, 500, 21),
+        });
+        box.Bounds = new Rectangle(22, y + 24, 398, 29);
+        var button = SecondaryButton("Browse");
+        button.Bounds = new Rectangle(430, y + 22, 110, 32);
+        button.Click += (_, _) => browse(button);
+        browseButtons.Add(button);
+        card.Controls.AddRange(new Control[] { box, button });
+    }
+
+    void ShowGameMenu(Button anchor)
+    {
+        using var menu = new ContextMenuStrip { Font = Font };
+        menu.Items.Add("Disc image (.iso)", null, (_, _) => PickGameIso());
+        menu.Items.Add("Extracted game folder", null, (_, _) => PickFolder(game, "Select the extracted LEGO Dimensions game folder", false));
+        menu.Show(anchor, new Point(0, anchor.Height));
+    }
+
+    void ShowUpdateMenu(Button anchor)
+    {
+        using var menu = new ContextMenuStrip { Font = Font };
+        menu.Items.Add("Original TU23 package", null, (_, _) => PickUpdatePackage());
+        menu.Items.Add("Extracted TU23 folder", null, (_, _) => PickFolder(update, "Select the extracted Title Update 23 folder", false));
+        menu.Show(anchor, new Point(0, anchor.Height));
     }
 
     async Task DetectAsync(bool silent = false)
     {
         if (installing) return;
-        SetBusy(true, "Looking for LEGO Dimensions files...");
+        SetBusy(true, "Looking for matching game files on this PC...");
         try
         {
             var result = await Task.Run(() => AutoDiscovery.Discover());
@@ -116,18 +323,22 @@ public sealed class EasyInstallForm : Form
             if (string.IsNullOrWhiteSpace(dlc.Text) && result.DlcPath is not null) dlc.Text = result.DlcPath;
 
             int found = (result.GamePath is null ? 0 : 1) + (result.UpdatePath is null ? 0 : 1) + (result.DlcPath is null ? 0 : 1);
-            status.Text = found == 0
-                ? "Nothing was auto-detected. Use Browse to select your files."
-                : $"Auto-detection found {found} source{(found == 1 ? "" : "s")}. Verify the paths, then click Install.";
-            status.ForeColor = found == 0 ? Color.DimGray : Color.ForestGreen;
-            if (!silent && found == 0)
-                MessageBox.Show(this, "No matching files were found automatically. Select your game ISO/folder and TU23 manually.",
-                    "Auto-detect", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            if (found == 0)
+            {
+                SetStatus("Nothing matched automatically. Choose the game and TU23 with Browse.", Muted);
+                if (!silent)
+                    MessageBox.Show(this, "No matching files were found automatically. Choose your game ISO or folder and Title Update 23 manually.",
+                        "Find files", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                SetStatus(found == 1 ? "Found one matching source. Check the paths before installing."
+                                     : $"Found {found} matching sources. Check the paths before installing.", Success);
+            }
         }
         catch (Exception e)
         {
-            status.Text = "Auto-detection failed: " + e.Message;
-            status.ForeColor = Color.Firebrick;
+            SetStatus("Automatic search could not finish: " + e.Message, Danger);
         }
         finally { SetBusy(false); }
     }
@@ -138,8 +349,12 @@ public sealed class EasyInstallForm : Form
         var sys = SystemCheck.Run();
         if (!sys.Supported)
         {
-            MessageBox.Show(this, string.Join(Environment.NewLine, sys.Warnings), "Unsupported PC",
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            Fail(string.Join(Environment.NewLine, sys.Warnings));
+            return;
+        }
+        if (language.SelectedItem is not GameLanguageOption selectedLanguage)
+        {
+            Fail("Choose a game language.");
             return;
         }
 
@@ -157,17 +372,17 @@ public sealed class EasyInstallForm : Form
         if (err is not null) { Fail(err); return; }
 
         cts = new CancellationTokenSource();
-        SetBusy(true, PreparedGameSource.IsIso(gamePath) ? "Preparing your Xbox 360 ISO..." : "Preparing installation...");
+        SetBusy(true, PreparedGameSource.IsIso(gamePath) ? "Extracting and validating the Xbox 360 disc image..." : "Preparing the installation...");
         progress.Value = 0;
         PreparedGameSource? prepared = null;
         try
         {
-            var prepProgress = new Progress<InstallProgress>(p => status.Text = p.Status);
+            var prepProgress = new Progress<InstallProgress>(p => SetStatus(p.Status, Muted));
             prepared = await PreparedGameSource.PrepareAsync(gamePath, prepProgress, cts.Token);
 
             var foundDlc = Validation.ScanDlc(dlcPath.Length == 0 ? null : dlcPath);
-            foreach (var b in Validation.ScanDlc(Path.Combine(prepared.GameDir, "5752084B", "00000002")))
-                if (!foundDlc.Any(d => d.Name.Equals(b.Name, StringComparison.OrdinalIgnoreCase))) foundDlc.Add(b);
+            foreach (var bundled in Validation.ScanDlc(Path.Combine(prepared.GameDir, "5752084B", "00000002")))
+                if (!foundDlc.Any(d => d.Name.Equals(bundled.Name, StringComparison.OrdinalIgnoreCase))) foundDlc.Add(bundled);
 
             var options = new InstallOptions
             {
@@ -177,7 +392,7 @@ public sealed class EasyInstallForm : Form
                 InstallDir = Path.GetFullPath(installPath),
                 IncludeToypad = payload.HasToypad,
                 IncludeMods = payload.HasMods,
-                IncludeRussian = false,
+                IncludeRussian = selectedLanguage.RequiresRussianMod,
                 IncludeSaveConverter = false,
                 IncludeUpdater = updates.Checked,
                 DesktopShortcut = shortcut.Checked,
@@ -188,7 +403,7 @@ public sealed class EasyInstallForm : Form
             {
                 long free = new DriveInfo(Path.GetPathRoot(options.InstallDir)!).AvailableFreeSpace;
                 if (free < need * 1.05)
-                    throw new InvalidOperationException($"Not enough free space. About {need / 1024.0 / 1024 / 1024:0.0} GB is needed.");
+                    throw new InvalidOperationException($"About {need / 1024.0 / 1024 / 1024:0.0} GB is required, but this drive does not have enough free space.");
             }
             catch (ArgumentException) { }
 
@@ -196,24 +411,25 @@ public sealed class EasyInstallForm : Form
             var reporter = new Progress<InstallProgress>(p =>
             {
                 progress.Value = Math.Clamp((int)(p.Fraction * 1000), 0, 1000);
-                if (p.Status != last) { last = p.Status; status.Text = p.Status; }
+                if (p.Status != last)
+                {
+                    last = p.Status;
+                    SetStatus(p.Status, Muted);
+                }
             });
             var job = new InstallJob(options, payload, reporter, cts.Token);
             await job.RunAsync(foundDlc);
-            ForkPostInstall.Apply(options.InstallDir);
+            ForkPostInstall.Apply(options.InstallDir, selectedLanguage);
 
             completedDir = options.InstallDir;
             progress.Value = 1000;
-            status.ForeColor = Color.ForestGreen;
-            status.Text = "Installation complete. Dimensions Recompiled is ready to launch.";
-            installButton.Text = "Open folder";
-            MessageBox.Show(this, "Installation completed successfully.", WizardForm.AppName,
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            openFolder.Visible = true;
+            SetStatus($"Ready · {selectedLanguage.DisplayName} · installed to {options.InstallDir}", Success);
         }
         catch (OperationCanceledException)
         {
-            status.Text = "Installation cancelled.";
-            status.ForeColor = Color.DimGray;
+            SetStatus("Installation cancelled. Existing source files were not changed.", Muted);
+            progress.Visible = false;
         }
         catch (Exception e)
         {
@@ -239,11 +455,11 @@ public sealed class EasyInstallForm : Form
 
         if (Directory.Exists(gamePath))
         {
-            string g = Path.GetFullPath(gamePath).TrimEnd('\\');
-            string i = path.TrimEnd('\\');
-            if (g.Equals(i, StringComparison.OrdinalIgnoreCase)
-                || g.StartsWith(i + "\\", StringComparison.OrdinalIgnoreCase)
-                || i.StartsWith(g + "\\", StringComparison.OrdinalIgnoreCase))
+            string source = Path.GetFullPath(gamePath).TrimEnd('\\');
+            string destination = path.TrimEnd('\\');
+            if (source.Equals(destination, StringComparison.OrdinalIgnoreCase)
+                || source.StartsWith(destination + "\\", StringComparison.OrdinalIgnoreCase)
+                || destination.StartsWith(source + "\\", StringComparison.OrdinalIgnoreCase))
                 return "The install location must be separate from the source game folder.";
         }
         return null;
@@ -258,50 +474,158 @@ public sealed class EasyInstallForm : Form
         Show();
     }
 
-    void PickGame(TextBox box)
+    void PickGameIso()
     {
-        using var f = new OpenFileDialog
+        using var dialog = new OpenFileDialog
         {
-            Title = "Select your Xbox 360 LEGO Dimensions ISO",
-            Filter = "Xbox 360 ISO (*.iso)|*.iso|All files|*.*"
+            Title = "Choose your LEGO Dimensions Xbox 360 disc image",
+            Filter = "Xbox 360 disc image (*.iso)|*.iso|All files|*.*",
+            CheckFileExists = true,
         };
-        if (f.ShowDialog(this) == DialogResult.OK) { box.Text = f.FileName; return; }
-        PickFolder(box, "Or select the already-extracted LEGO Dimensions disc folder", false);
+        if (dialog.ShowDialog(this) == DialogResult.OK) game.Text = dialog.FileName;
     }
 
-    void PickUpdate(TextBox box)
+    void PickUpdatePackage()
     {
-        using var f = new OpenFileDialog { Title = "Select the Title Update 23 package", Filter = "All files|*.*" };
-        if (f.ShowDialog(this) == DialogResult.OK) { box.Text = f.FileName; return; }
-        PickFolder(box, "Or select the extracted Title Update 23 folder", false);
+        using var dialog = new OpenFileDialog
+        {
+            Title = "Choose the Title Update 23 package",
+            Filter = "All files|*.*",
+            CheckFileExists = true,
+        };
+        if (dialog.ShowDialog(this) == DialogResult.OK) update.Text = dialog.FileName;
     }
 
     void PickFolder(TextBox box, string description, bool create)
     {
-        using var d = new FolderBrowserDialog
+        using var dialog = new FolderBrowserDialog
         {
             Description = description,
             UseDescriptionForTitle = true,
             ShowNewFolderButton = create,
         };
-        if (Directory.Exists(box.Text)) d.InitialDirectory = box.Text;
-        if (d.ShowDialog(this) == DialogResult.OK) box.Text = d.SelectedPath;
+        if (Directory.Exists(box.Text)) dialog.InitialDirectory = box.Text;
+        if (dialog.ShowDialog(this) == DialogResult.OK) box.Text = dialog.SelectedPath;
+    }
+
+    void LaunchGame()
+    {
+        if (completedDir is null) return;
+        string exe = Path.Combine(completedDir, "legodimensions.exe");
+        if (!File.Exists(exe))
+        {
+            OpenInstallFolder();
+            return;
+        }
+        try
+        {
+            Process.Start(new ProcessStartInfo(exe)
+            {
+                UseShellExecute = true,
+                WorkingDirectory = completedDir,
+            });
+        }
+        catch (Exception e) { Fail("Could not launch the game: " + e.Message); }
+    }
+
+    void OpenInstallFolder()
+    {
+        if (completedDir is null) return;
+        try { Process.Start(new ProcessStartInfo(completedDir) { UseShellExecute = true }); }
+        catch (Exception e) { Fail("Could not open the install folder: " + e.Message); }
     }
 
     void Fail(string message)
     {
-        status.Text = message;
-        status.ForeColor = Color.Firebrick;
-        MessageBox.Show(this, message, "Cannot continue", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        SetStatus(message, Danger);
+        MessageBox.Show(this, message, "Dimensions Recompiled", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 
     void SetBusy(bool busy, string? message = null)
     {
         installing = busy;
         game.Enabled = update.Enabled = dlc.Enabled = install.Enabled = !busy;
-        detect.Enabled = advanced.Enabled = !busy;
-        installButton.Enabled = !busy || completedDir is not null;
+        language.Enabled = detect.Enabled = advanced.Enabled = !busy;
+        foreach (var button in browseButtons) button.Enabled = !busy;
         shortcut.Enabled = updates.Enabled = !busy;
-        if (message is not null) { status.Text = message; status.ForeColor = Color.DimGray; }
+        openFolder.Enabled = !busy;
+        progress.Visible = busy || completedDir is not null;
+        installButton.Text = busy ? "Cancel" : completedDir is null ? "Install" : "Launch game";
+        if (message is not null) SetStatus(message, Muted);
+    }
+
+    void SetStatus(string text, Color color)
+    {
+        status.Text = text;
+        status.ForeColor = color;
+    }
+
+    static Panel Card(Rectangle bounds) => new()
+    {
+        Bounds = bounds,
+        BackColor = Color.White,
+        BorderStyle = BorderStyle.FixedSingle,
+    };
+
+    static Label SectionTitle(string text, int y) => new()
+    {
+        Text = text,
+        Font = new Font("Segoe UI Semibold", 14f),
+        ForeColor = Ink,
+        Bounds = new Rectangle(22, y, 500, 30),
+    };
+
+    static TextBox PathBox(string placeholder) => new()
+    {
+        PlaceholderText = placeholder,
+        BorderStyle = BorderStyle.FixedSingle,
+        Font = new Font("Segoe UI", 9.5f),
+        ForeColor = Ink,
+        BackColor = Color.White,
+    };
+
+    static CheckBox OptionBox(string text, bool isChecked) => new()
+    {
+        Text = text,
+        Checked = isChecked,
+        AutoSize = true,
+        Font = new Font("Segoe UI", 9.25f),
+        ForeColor = Ink,
+    };
+
+    static Button PrimaryButton(string text) => new()
+    {
+        Text = text,
+        FlatStyle = FlatStyle.Flat,
+        BackColor = Accent,
+        ForeColor = Color.White,
+        Font = new Font("Segoe UI Semibold", 10f),
+        Cursor = Cursors.Hand,
+        UseVisualStyleBackColor = false,
+        FlatAppearance = { BorderSize = 0 },
+    };
+
+    static Button SecondaryButton(string text) => new()
+    {
+        Text = text,
+        FlatStyle = FlatStyle.Flat,
+        BackColor = Color.White,
+        ForeColor = Ink,
+        Font = new Font("Segoe UI Semibold", 9f),
+        Cursor = Cursors.Hand,
+        UseVisualStyleBackColor = false,
+        FlatAppearance = { BorderColor = Line, BorderSize = 1 },
+    };
+
+    static Image? LoadLogo()
+    {
+        try
+        {
+            using Stream? stream = typeof(EasyInstallForm).Assembly.GetManifestResourceStream("DimensionsLogo.png");
+            if (stream is null) return null;
+            using Image source = Image.FromStream(stream);
+            return new Bitmap(source);
+        }
+        catch { return null; }
     }
 }
