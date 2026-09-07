@@ -107,11 +107,32 @@ public sealed class PreparedGameSource : IDisposable
 
         using var process = Process.Start(psi)
             ?? throw new InvalidOperationException("Could not start extract-xiso.");
-        string stdoutTask = await process.StandardOutput.ReadToEndAsync(ct);
-        string stderrTask = await process.StandardError.ReadToEndAsync(ct);
-        await process.WaitForExitAsync(ct);
-        if (process.ExitCode != 0)
-            throw new InvalidOperationException("Could not extract the Xbox 360 ISO. " + (stderrTask.Trim().Length > 0 ? stderrTask.Trim() : stdoutTask.Trim()));
+
+        // Drain both redirected pipes concurrently. Reading one to completion
+        // before the other can deadlock if the child fills the other pipe.
+        Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
+        Task<string> stderrTask = process.StandardError.ReadToEndAsync(ct);
+        try
+        {
+            await process.WaitForExitAsync(ct);
+            string stdout = await stdoutTask;
+            string stderr = await stderrTask;
+            if (process.ExitCode != 0)
+                throw new InvalidOperationException("Could not extract the Xbox 360 ISO. "
+                    + (stderr.Trim().Length > 0 ? stderr.Trim() : stdout.Trim()));
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancellation must not leave an extractor holding files in the temp
+            // directory, otherwise cleanup fails and a hidden process keeps running.
+            try
+            {
+                if (!process.HasExited) process.Kill(entireProcessTree: true);
+            }
+            catch { }
+            try { await process.WaitForExitAsync(CancellationToken.None); } catch { }
+            throw;
+        }
     }
 
     static void TryDelete(string path)
