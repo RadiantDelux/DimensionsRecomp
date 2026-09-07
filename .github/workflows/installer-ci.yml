@@ -1,0 +1,32 @@
+name: Installer CI
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'rexlego-installer/**'
+      - '.github/workflows/installer-ci.yml'
+  pull_request:
+    paths:
+      - 'rexlego-installer/**'
+      - '.github/workflows/installer-ci.yml'
+  workflow_dispatch:
+
+jobs:
+  build-installer-host:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Restore
+        run: dotnet restore rexlego-installer/Setup.csproj
+      - name: Build
+        run: dotnet build rexlego-installer/Setup.csproj -c Release --no-restore -warnaserror
+      - name: Publish self-contained host
+        run: dotnet publish rexlego-installer/Setup.csproj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:DebugType=none -o artifacts/installer-host
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-host
+          path: artifacts/installer-host/DimensionsRecompiled-Setup.exe
