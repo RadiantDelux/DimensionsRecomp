@@ -26,10 +26,17 @@ static class Program
             return 2;
         }
 
+        ApplicationConfiguration.Initialize();
+        if (args.Length == 1 && args[0].Equals("--advanced", StringComparison.OrdinalIgnoreCase))
+        {
+            Application.Run(new WizardForm(payload));
+            return 0;
+        }
         if (args.Length > 0) return Unattended(args, payload);
 
-        ApplicationConfiguration.Initialize();
-        Application.Run(new WizardForm(payload));
+        // Default to the one-screen installer. The original detailed wizard is
+        // still available from its Advanced button or with --advanced.
+        Application.Run(new EasyInstallForm(payload));
         return 0;
     }
 
