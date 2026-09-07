@@ -12,21 +12,48 @@ on:
       - '.github/workflows/installer-ci.yml'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  build-installer-host:
+  build-installer:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+
       - name: Restore
         run: dotnet restore rexlego-installer/Setup.csproj
-      - name: Build
+
+      - name: Compile with warnings as errors
         run: dotnet build rexlego-installer/Setup.csproj -c Release --no-restore -warnaserror
-      - name: Publish self-contained host
-        run: dotnet publish rexlego-installer/Setup.csproj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:DebugType=none -o artifacts/installer-host
-      - uses: actions/upload-artifact@v4
+
+      - name: Build complete installer
+        shell: pwsh
+        run: ./rexlego-installer/build-fork-installer.ps1
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: installer-host
-          path: artifacts/installer-host/DimensionsRecompiled-Setup.exe
+          name: DimensionsRecompiled-EasySetup
+          path: rexlego-installer/fork-dist/DimensionsRecompiled-Setup.exe
+          if-no-files-found: error
+
+      - name: Publish rolling installer release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $repo = "${{ github.repository }}"
+          $asset = "rexlego-installer/fork-dist/DimensionsRecompiled-Setup.exe"
+          gh release view easy-installer --repo $repo *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload easy-installer $asset --repo $repo --clobber
+          } else {
+            gh release create easy-installer $asset --repo $repo --target $env:GITHUB_SHA --prerelease `
+              --title "Dimensions Recompiled - Easy Installer" `
+              --notes "Rolling installer build for this fork. It contains the public recompilation payload, but no LEGO Dimensions game data. Supply your own Xbox 360 disc dump or ISO and Title Update 23."
+          }
